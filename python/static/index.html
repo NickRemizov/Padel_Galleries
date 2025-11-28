@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Padel Tournament Recognition - Тестовый интерфейс</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }
+        
+        .upload-section {
+            border: 3px dashed #667eea;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+            background: #f8f9ff;
+            transition: all 0.3s;
+        }
+        
+        .upload-section:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+        
+        .upload-section.dragover {
+            border-color: #764ba2;
+            background: #e8ebff;
+            transform: scale(1.02);
+        }
+        
+        input[type="file"] {
+            display: none;
+        }
+        
+        .upload-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 32px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .upload-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .action-btn {
+            flex: 1;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .process-btn {
+            background: #10b981;
+            color: white;
+        }
+        
+        .process-btn:hover {
+            background: #059669;
+            transform: translateY(-2px);
+        }
+        
+        .group-btn {
+            background: #3b82f6;
+            color: white;
+        }
+        
+        .group-btn:hover {
+            background: #2563eb;
+            transform: translateY(-2px);
+        }
+        
+        .clear-btn {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .clear-btn:hover {
+            background: #dc2626;
+            transform: translateY(-2px);
+        }
+        
+        .results {
+            margin-top: 30px;
+        }
+        
+        .result-card {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .result-card h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .result-card p {
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .status {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            display: inline-block;
+            margin-bottom: 15px;
+        }
+        
+        .status.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        
+        .status.loading {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        
+        .file-list {
+            margin-top: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+        }
+        
+        .file-item {
+            padding: 8px;
+            border-bottom: 1px solid #e5e7eb;
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .file-item:last-child {
+            border-bottom: none;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .group-card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 2px solid #e5e7eb;
+        }
+        
+        .group-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .group-title {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .group-badge {
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        /* Обновленные стили для превью изображений */
+        .photo-gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 10px;
+            margin-top: 12px;
+        }
+        
+        .photo-item {
+            position: relative;
+            aspect-ratio: 1;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid #e5e7eb;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+        
+        .photo-item:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-color: #667eea;
+        }
+        
+        .photo-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        .photo-item-label {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            color: white;
+            font-size: 10px;
+            padding: 4px 6px;
+            text-align: center;
+        }
+        
+        .ungrouped-section {
+            margin-top: 30px;
+            padding: 20px;
+            background: #fef3c7;
+            border-radius: 12px;
+            border-left: 4px solid #f59e0b;
+        }
+        
+        .ungrouped-title {
+            font-weight: 600;
+            color: #92400e;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+        
+        .ungrouped-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 12px;
+        }
+        
+        /* Обновленные стили для одиночных лиц с превью */
+        .ungrouped-item {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid #fbbf24;
+            transition: transform 0.2s;
+            cursor: pointer;
+        }
+        
+        .ungrouped-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(251, 191, 36, 0.3);
+        }
+        
+        .ungrouped-item img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+        }
+        
+        .ungrouped-item-info {
+            padding: 8px;
+            font-size: 11px;
+            color: #666;
+            text-align: center;
+        }
+        
+        .ungrouped-item-confidence {
+            font-size: 10px;
+            color: #999;
+            margin-top: 2px;
+        }
+        
+        /* Добавлены стили для кнопки раскрытия и списка фото */
+        .expand-btn {
+            margin-top: 12px;
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .expand-btn:hover {
+            background: #5568d3;
+        }
+        
+        .faces-list {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            margin-top: 0;
+        }
+        
+        .faces-list.expanded {
+            max-height: 2000px;
+            margin-top: 15px;
+            transition: max-height 0.5s ease-in;
+        }
+        
+        .photo-error {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #fee2e2;
+            color: #991b1b;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        /* Added modal styles for face preview with bbox */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            animation: fadeIn 0.3s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .modal-content {
+            position: relative;
+            margin: 2% auto;
+            max-width: 90%;
+            max-height: 90%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .modal-canvas {
+            max-width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        }
+        
+        .modal-info {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            text-align: center;
+            min-width: 300px;
+            max-width: 90vw;
+        }
+        
+        .modal-info h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 20px;
+        }
+        
+        .modal-info p {
+            color: #666;
+            margin: 5px 0;
+            font-size: 14px;
+        }
+        
+        /* Added horizontal layout for players list in modal */
+        .modal-players-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 15px;
+        }
+        
+        .modal-player-item {
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: #f9fafb;
+            border-left: 4px solid;
+            flex: 0 1 auto;
+        }
+        
+        .modal-player-name {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+        
+        .modal-player-confidence {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .modal-close {
+            position: absolute;
+            top: 20px;
+            right: 40px;
+            color: white;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s;
+            z-index: 1001;
+        }
+        
+        .modal-close:hover {
+            color: #667eea;
+        }
+
+        /* Added progress bar styles */
+        .progress-container {
+            width: 100%;
+            background: #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .progress-bar {
+            height: 30px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        
+        .progress-text {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎾 Padel Tournament Recognition</h1>
+        <p class="subtitle">Тестовый интерфейс для распознавания и группировки игроков</p>
+        
+        <div class="upload-section" id="uploadSection">
+            <h2 style="margin-bottom: 15px; color: #667eea;">Загрузите фотографии турнира</h2>
+            <p style="color: #666; margin-bottom: 20px;">Перетащите файлы сюда или нажмите кнопку</p>
+            <input type="file" id="fileInput" multiple accept="image/*">
+            <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                Выбрать файлы
+            </button>
+            <div class="file-list" id="fileList" style="display: none;"></div>
+        </div>
+        
+        <!-- Added progress bar -->
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar" id="progressBar">0%</div>
+        </div>
+        <div class="progress-text" id="progressText"></div>
+        
+        <div class="actions">
+            <button class="action-btn process-btn" id="processBtn" onclick="processPhotos()" disabled>
+                🔍 Распознать лица
+            </button>
+            <button class="action-btn group-btn" id="groupBtn" onclick="groupPlayers()" disabled>
+                👥 Сгруппировать игроков
+            </button>
+            <button class="action-btn clear-btn" onclick="clearData()">
+                🗑️ Очистить данные
+            </button>
+        </div>
+        
+        <div class="results" id="results"></div>
+    </div>
+    
+    <!-- Added modal for face preview with bbox -->
+    <div id="faceModal" class="modal" onclick="closeModal(event)">
+        <span class="modal-close" onclick="closeModal(event)">&times;</span>
+        <div class="modal-content">
+            <canvas id="modalCanvas" class="modal-canvas"></canvas>
+            <div class="modal-info" id="modalInfo"></div>
+        </div>
+    </div>
+    
+    <script>
+        let selectedFiles = [];
+        let currentTournamentId = null;
+        let photosWithFaces = {}; // Store all faces grouped by photo
+        let progressInterval = null;
+        
+        const fileInput = document.getElementById('fileInput');
+        const uploadSection = document.getElementById('uploadSection');
+        const fileList = document.getElementById('fileList');
+        const processBtn = document.getElementById('processBtn');
+        const groupBtn = document.getElementById('groupBtn');
+        const results = document.getElementById('results');
+        
+        // Обработка выбора файлов
+        fileInput.addEventListener('change', (e) => {
+            selectedFiles = Array.from(e.target.files);
+            updateFileList();
+        });
+        
+        // Drag & Drop
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+        
+        uploadSection.addEventListener('dragleave', () => {
+            uploadSection.classList.remove('dragover');
+        });
+        
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            selectedFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+            updateFileList();
+        });
+        
+        function updateFileList() {
+            if (selectedFiles.length > 0) {
+                fileList.style.display = 'block';
+                fileList.innerHTML = '<strong>Выбрано файлов: ' + selectedFiles.length + '</strong><br>' +
+                    selectedFiles.map(f => `<div class="file-item">📷 ${f.name}</div>`).join('');
+                processBtn.disabled = false;
+            } else {
+                fileList.style.display = 'none';
+                processBtn.disabled = true;
+            }
+        }
+        
+        function showProgress(percent, text) {
+            const container = document.getElementById('progressContainer');
+            const bar = document.getElementById('progressBar');
+            const textEl = document.getElementById('progressText');
+            
+            container.style.display = 'block';
+            bar.style.width = percent + '%';
+            bar.textContent = Math.round(percent) + '%';
+            textEl.textContent = text || '';
+        }
+        
+        function hideProgress() {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+                progressInterval = null;
+            }
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('progressText').textContent = '';
+        }
+        
+        function simulateProgress(startPercent, endPercent, duration, text, fileCount) {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+            }
+            
+            let currentPercent = startPercent;
+            const totalSteps = fileCount || 10;
+            const percentPerStep = (endPercent - startPercent) / totalSteps;
+            const timePerStep = duration / totalSteps;
+            let currentStep = 0;
+            
+            showProgress(currentPercent, text);
+            
+            progressInterval = setInterval(() => {
+                currentStep++;
+                currentPercent = startPercent + (percentPerStep * currentStep);
+                
+                if (currentPercent >= endPercent) {
+                    currentPercent = endPercent;
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                }
+                
+                const progressText = fileCount ? 
+                    `${text} (${Math.min(currentStep, fileCount)}/${fileCount})` : 
+                    text;
+                showProgress(currentPercent, progressText);
+            }, timePerStep);
+        }
+        
+        async function processPhotos() {
+            if (selectedFiles.length === 0) return;
+            
+            showLoading('Обработка фотографий...');
+            processBtn.disabled = true;
+            
+            const formData = new FormData();
+            selectedFiles.forEach(file => {
+                formData.append('files', file);
+            });
+            
+            if (!currentTournamentId) {
+                currentTournamentId = 'tournament_' + Date.now();
+            }
+            formData.append('tournament_id', currentTournamentId);
+            
+            try {
+                simulateProgress(0, 90, 3000, `Обработка фотографий`, selectedFiles.length);
+                
+                const response = await fetch('/api/upload-photos', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                showProgress(100, 'Обработка завершена!');
+                
+                if (data.success) {
+                    setTimeout(() => {
+                        hideProgress();
+                        showSuccess(`✅ ${data.message}`, data);
+                        groupBtn.disabled = false;
+                    }, 500);
+                } else {
+                    hideProgress();
+                    showError('Ошибка обработки фотографий');
+                }
+            } catch (error) {
+                hideProgress();
+                showError('Ошибка: ' + error.message);
+            } finally {
+                processBtn.disabled = false;
+            }
+        }
+        
+        async function groupPlayers() {
+            showLoading('Группировка игроков...');
+            groupBtn.disabled = true;
+            
+            const formData = new FormData();
+            formData.append('tournament_id', currentTournamentId);
+            formData.append('min_cluster_size', '3');
+            
+            try {
+                const estimatedFaces = selectedFiles.length * 2;
+                simulateProgress(0, 90, 2000, 'Анализ и группировка лиц', estimatedFaces);
+                
+                const response = await fetch('/api/group-players', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                showProgress(100, 'Группировка завершена!');
+                
+                if (data.success) {
+                    if (data.photos_with_faces) {
+                        photosWithFaces = {};
+                        data.photos_with_faces.forEach(photo => {
+                            photosWithFaces[photo.image_name] = photo.faces;
+                        });
+                        console.log('[v0] Сохранено фото с лицами:', Object.keys(photosWithFaces).length);
+                    }
+                    
+                    setTimeout(() => {
+                        hideProgress();
+                        showGroupingResults(data);
+                    }, 500);
+                } else {
+                    hideProgress();
+                    showError('Ошибка группировки');
+                }
+            } catch (error) {
+                hideProgress();
+                showError('Ошибка: ' + error.message);
+            } finally {
+                groupBtn.disabled = false;
+            }
+        }
+        
+        async function clearData() {
+            if (!confirm('Вы уверены, что хотите очистить все данные?')) return;
+            
+            try {
+                await fetch('/api/clear-data', { method: 'DELETE' });
+                selectedFiles = [];
+                currentTournamentId = null;
+                photosWithFaces = {}; // Clear stored faces
+                fileList.style.display = 'none';
+                processBtn.disabled = true;
+                groupBtn.disabled = true;
+                results.innerHTML = '<div class="status success">Данные очищены</div>';
+                hideProgress(); // Hide progress bar if it was visible
+            } catch (error) {
+                showError('Ошибка очистки: ' + error.message);
+            }
+        }
+        
+        function showLoading(message) {
+            results.innerHTML = `
+                <div class="status loading">${message}</div>
+                <div class="spinner"></div>
+            `;
+        }
+        
+        function showSuccess(message, data) {
+            results.innerHTML = `
+                <div class="status success">${message}</div>
+                <div class="result-card">
+                    <h3>Результаты распознавания</h3>
+                    <p><strong>Обработано фотографий:</strong> ${selectedFiles.length}</p>
+                    <p><strong>Найдено лиц:</strong> ${data.faces_count}</p>
+                    <p><strong>ID турнира:</strong> ${data.tournament_id}</p>
+                </div>
+            `;
+        }
+        
+        function showGroupingResults(data) {
+            if (data.tournament_id) {
+                currentTournamentId = data.tournament_id;
+            }
+            
+            let html = `
+                <div class="status success">✅ ${data.message}</div>
+                <div class="result-card">
+                    <h3>Результаты группировки</h3>
+                    <p><strong>Найдено групп игроков:</strong> ${data.groups_count}</p>
+                    ${data.ungrouped_count > 0 ? `<p><strong>Одиночных лиц:</strong> ${data.ungrouped_count}</p>` : ''}
+                </div>
+            `;
+            
+            data.groups.forEach((group, index) => {
+                const groupId = `group-${index}`;
+                html += `
+                    <div class="group-card">
+                        <div class="group-header">
+                            <span class="group-title">${group.player_name}</span>
+                            <span class="group-badge">${group.faces_count} фото</span>
+                        </div>
+                        <p style="color: #666; font-size: 14px; margin-bottom: 8px;">
+                            Уверенность: ${(group.confidence * 100).toFixed(1)}%
+                        </p>
+                        
+                        ${group.sample_images && group.sample_images.length > 0 ? `
+                            <div class="photo-gallery">
+                                ${group.sample_images.map(img => {
+                                    return `
+                                        <div class="photo-item" onclick='showFaceModal("${currentTournamentId}", "${img}")'>
+                                            <img src="/uploads/${currentTournamentId}/${img}" 
+                                                 alt="${img}" 
+                                                 loading="lazy"
+                                                 onerror="this.parentElement.classList.add('photo-error'); this.style.display='none'; this.parentElement.innerHTML='<span>Ошибка загрузки</span>'">
+                                            <div class="photo-item-label">${img.substring(0, 15)}...</div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                                ${group.faces_count > group.sample_images.length ? `
+                                    <div class="photo-item" style="display: flex; align-items: center; justify-content: center; background: #f3f4f6; border-style: dashed;">
+                                        <span style="color: #667eea; font-weight: 600; font-size: 14px;">
+                                            +${group.faces_count - group.sample_images.length}
+                                        </span>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        ` : ''}
+                        
+                        <button class="expand-btn" onclick="toggleFacesList('${groupId}')">
+                            Показать все фото
+                        </button>
+                        
+                        <div class="faces-list" id="${groupId}">
+                            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px;">
+                                ${group.faces.map((face, idx) => {
+                                    return `
+                                        <div style="text-align: center;">
+                                            <div class="photo-item" onclick='showFaceModal("${currentTournamentId}", "${face.image_name}")'>
+                                                <img src="/uploads/${currentTournamentId}/${face.image_name}" 
+                                                     alt="${face.image_name}" 
+                                                     loading="lazy"
+                                                     onerror="this.parentElement.classList.add('photo-error'); this.style.display='none'; this.parentElement.innerHTML='<div style=\\'padding:20px;text-align:center;color:#991b1b;font-size:11px\\'>Ошибка загрузки</div>'">
+                                            </div>
+                                            <div style="font-size: 10px; color: #666; margin-top: 4px;">
+                                                ${(face.confidence * 100).toFixed(1)}%
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            if (data.ungrouped_count > 0) {
+                html += `
+                    <div class="ungrouped-section">
+                        <div class="ungrouped-title">
+                            ⚠️ Одиночные лица (не попали в группы): ${data.ungrouped_count}
+                        </div>
+                        <p style="color: #92400e; font-size: 13px; margin-bottom: 15px;">
+                            Эти лица встречаются менее 3 раз или слишком отличаются от других
+                        </p>
+                        <div class="ungrouped-grid">
+                            ${data.ungrouped_faces.slice(0, 20).map(face => {
+                                return `
+                                    <div class="ungrouped-item" onclick='showFaceModal("${currentTournamentId}", "${face.image_name}")'>
+                                        <img src="/uploads/${currentTournamentId}/${face.image_name}" 
+                                             alt="${face.image_name}" 
+                                             loading="lazy"
+                                             onerror="this.parentElement.classList.add('photo-error'); this.style.display='none'; this.parentElement.innerHTML='<div style=\\'padding:20px;text-align:center;color:#991b1b;font-size:11px\\'>Ошибка загрузки</div>'">
+                                        <div class="ungrouped-item-info">
+                                            ${face.image_name.substring(0, 20)}...
+                                            <div class="ungrouped-item-confidence">
+                                                ${(face.confidence * 100).toFixed(1)}%
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        ${data.ungrouped_count > 20 ? `
+                            <p style="margin-top: 10px; font-size: 12px; color: #92400e;">
+                                ... и еще ${data.ungrouped_count - 20} лиц
+                            </p>
+                        ` : ''}
+                    </div>
+                `;
+            }
+            
+            results.innerHTML = html;
+            
+            console.log('[v0] Результаты группировки отображены, tournament_id:', currentTournamentId);
+        }
+        
+        function toggleFacesList(groupId) {
+            const facesList = document.getElementById(groupId);
+            const btn = event.target;
+            
+            if (facesList.classList.contains('expanded')) {
+                facesList.classList.remove('expanded');
+                btn.textContent = 'Показать все фото';
+            } else {
+                facesList.classList.add('expanded');
+                btn.textContent = 'Скрыть фото';
+            }
+        }
+        
+        function showError(message) {
+            results.innerHTML = `<div class="status error">❌ ${message}</div>`;
+        }
+        
+        function showFaceModal(tournamentId, imageName) {
+            const modal = document.getElementById('faceModal');
+            const canvas = document.getElementById('modalCanvas');
+            const modalInfo = document.getElementById('modalInfo');
+            const ctx = canvas.getContext('2d');
+            
+            const facesOnPhoto = photosWithFaces[imageName] || [];
+            console.log('[v0] Открытие модального окна для:', imageName);
+            console.log('[v0] Найдено лиц на фото:', facesOnPhoto.length);
+            
+            const img = new Image();
+            img.onload = function() {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                
+                ctx.drawImage(img, 0, 0);
+                
+                if (facesOnPhoto.length > 0) {
+                    facesOnPhoto.forEach((faceData, index) => {
+                        if (faceData.bbox && faceData.bbox.length === 4) {
+                            const [x1, y1, x2, y2] = faceData.bbox;
+                            const width = x2 - x1;
+                            const height = y2 - y1;
+                            
+                            const colors = ['#667eea', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+                            const color = colors[index % colors.length];
+                            
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 4;
+                            ctx.strokeRect(x1, y1, width, height);
+                            
+                            const labelText = faceData.player_name || 'Неизвестный';
+                            ctx.font = 'bold 20px Arial';
+                            const textWidth = ctx.measureText(labelText).width;
+                            const labelHeight = 30;
+                            const labelY = y1 > labelHeight + 10 ? y1 - labelHeight - 5 : y2 + 5;
+                            
+                            ctx.fillStyle = color;
+                            ctx.fillRect(x1, labelY, textWidth + 20, labelHeight);
+                            
+                            ctx.fillStyle = 'white';
+                            ctx.fillText(labelText, x1 + 10, labelY + 22);
+                        }
+                    });
+                }
+                
+                let infoHtml = `<h3>Фото: ${imageName}</h3>`;
+                
+                if (facesOnPhoto.length > 0) {
+                    infoHtml += `<p><strong>Найдено игроков:</strong> ${facesOnPhoto.length}</p>`;
+                    infoHtml += '<div class="modal-players-list">';
+                    facesOnPhoto.forEach((face, index) => {
+                        const colors = ['#667eea', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+                        const color = colors[index % colors.length];
+                        infoHtml += `
+                            <div class="modal-player-item" style="border-left-color: ${color};">
+                                <div class="modal-player-name">${face.player_name || 'Неизвестный'}</div>
+                                <div class="modal-player-confidence">
+                                    Уверенность: ${(face.confidence * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        `;
+                    });
+                    infoHtml += '</div>';
+                } else {
+                    infoHtml += '<p style="color: #999;">Информация о лицах недоступна</p>';
+                }
+                
+                modalInfo.innerHTML = infoHtml;
+                
+                modal.style.display = 'block';
+            };
+            
+            img.onerror = function() {
+                alert('Ошибка загрузки изображения');
+            };
+            
+            img.src = `/uploads/${tournamentId}/${imageName}`;
+        }
+        
+        function closeModal(event) {
+            const modal = document.getElementById('faceModal');
+            if (event.target === modal || event.target.className === 'modal-close') {
+                modal.style.display = 'none';
+            }
+        }
+        
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                document.getElementById('faceModal').style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

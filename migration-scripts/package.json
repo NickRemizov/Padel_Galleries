@@ -1,0 +1,21 @@
+{
+  "name": "galleries-migration",
+  "version": "1.0.0",
+  "description": "Migration scripts for Galleries project",
+  "private": true,
+  "scripts": {
+    "migrate:schema": "psql $TARGET_DATABASE_URL -f 001_create_schema.sql",
+    "migrate:data": "tsx 002_migrate_data.ts",
+    "migrate:files": "tsx 003_migrate_files.ts",
+    "migrate:all": "npm run migrate:schema && npm run migrate:data && npm run migrate:files"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.705.0",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

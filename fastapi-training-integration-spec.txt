@@ -1,0 +1,1682 @@
+================================================================================
+ТЕХНИЧЕСКОЕ ЗАДАНИЕ: ИНТЕГРАЦИЯ ОБУЧЕНИЯ INSIGHTFACE В FASTAPI СЕРВЕР
+================================================================================
+
+ВЕРСИЯ: 1.0
+ДАТА: 2024-01-15
+АВТОР: Техническое задание для интеграции обучения модели InsightFace
+
+================================================================================
+1. ОБЩИЙ КОНТЕКСТ И АРХИТЕКТУРА
+================================================================================
+
+1.1 ТЕКУЩАЯ СИСТЕМА
+-------------------
+Система состоит из двух независимых компонентов:
+
+A) Next.js приложение (Галерея фотографий)
+   - База данных: Supabase PostgreSQL
+   - URL: https://jczmumbzpqlckbkgznsd.supabase.co
+   - Функционал: загрузка фото, просмотр галерей, управление событиями
+   - Пользователи вручную подтверждают распознанные лица (verified=true)
+
+B) FastAPI сервер (Распознавание лиц)
+   - База данных: SQLite (локальная)
+   - URL: http://23.88.61.20:8001
+   - Функционал: распознавание лиц через InsightFace (antelopev2)
+   - Технологии: InsightFace + hnswlib (поиск) + HDBSCAN (кластеризация)
+
+1.2 ЦЕЛЬ ИНТЕГРАЦИИ
+-------------------
+Добавить в FastAPI сервер возможность обучения модели InsightFace на 
+подтвержденных лицах (verified faces) из Supabase базы данных.
+
+ВАЖНО: Две базы данных остаются независимыми. FastAPI будет ЧИТАТЬ данные 
+из Supabase для обучения, но хранить свои данные в SQLite.
+
+1.3 ПОТОК ДАННЫХ
+----------------
+1. Пользователь загружает фото в Next.js → сохраняется в Supabase
+2. Next.js вызывает FastAPI для распознавания лиц
+3. FastAPI возвращает предложения совпадений
+4. Пользователь подтверждает правильные совпадения → verified=true в Supabase
+5. Когда накопилось достаточно verified faces → запускается обучение
+6. FastAPI читает verified faces из Supabase
+7. FastAPI обучает модель и сохраняет результаты в свою SQLite
+8. Обновленная модель используется для распознавания новых фото
+
+================================================================================
+2. СХЕМА БАЗЫ ДАННЫХ SUPABASE (ИСТОЧНИК ДАННЫХ)
+================================================================================
+
+2.1 ТАБЛИЦА: photo_faces
+------------------------
+Хранит информацию о лицах на фотографиях.
+
+CREATE TABLE photo_faces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    photo_id UUID NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+    bbox JSONB NOT NULL,
+    descriptor VECTOR(128),  -- старый Face-API дескриптор (игнорировать)
+    confidence REAL,
+    verified BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    
+    -- НОВЫЕ ПОЛЯ ДЛЯ INSIGHTFACE (уже добавлены в БД):
+    insightface_descriptor VECTOR(512),
+    insightface_confidence REAL,
+    insightface_bbox JSONB,
+    training_used BOOLEAN DEFAULT false,
+    training_context JSONB
+);
+
+ВАЖНЫЕ ПОЛЯ ДЛЯ ОБУЧЕНИЯ:
+- verified = true → только эти лица использовать для обучения
+- person_id NOT NULL → лицо должно быть привязано к человеку
+- bbox → координаты лица: {"x": 100, "y": 200, "width": 150, "height": 150}
+- insightface_descriptor → сюда ЗАПИСАТЬ дескриптор после извлечения (512 float)
+- training_used → пометить true после использования в обучении
+- training_context → сохранить контекст: {"event_id": "...", "co_occurring_people": ["id1", "id2"]}
+
+2.2 ТАБЛИЦА: photos
+-------------------
+Хранит информацию о фотографиях.
+
+CREATE TABLE photos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID REFERENCES events(id) ON DELETE CASCADE,
+    storage_path TEXT NOT NULL,
+    url TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ВАЖНЫЕ ПОЛЯ:
+- url → использовать для скачивания фото (публичный URL)
+- event_id → для контекстно-зависимого обучения
+
+2.3 ТАБЛИЦА: people
+-------------------
+Хранит информацию о людях.
+
+CREATE TABLE people (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    real_name TEXT,
+    telegram_name TEXT,
+    telegram_nickname TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ВАЖНЫЕ ПОЛЯ:
+- real_name → имя человека для отображения
+
+2.4 ТАБЛИЦА: events
+-------------------
+Хранит информацию о мероприятиях.
+
+CREATE TABLE events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    date DATE NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ВАЖНЫЕ ПОЛЯ:
+- name, date → для группировки лиц по событиям
+
+2.5 ТАБЛИЦА: face_training_sessions
+------------------------------------
+Хранит историю обучений (уже создана в Supabase).
+
+CREATE TABLE face_training_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    model_version TEXT,
+    training_mode TEXT,
+    faces_count INTEGER,
+    people_count INTEGER,
+    context_weight REAL,
+    min_faces_per_person INTEGER,
+    metrics JSONB,
+    status TEXT
+);
+
+ВАЖНО: FastAPI должен ЗАПИСЫВАТЬ в эту таблицу после каждого обучения.
+
+2.6 ТАБЛИЦА: face_recognition_config
+-------------------------------------
+Хранит конфигурацию распознавания (уже создана в Supabase).
+
+CREATE TABLE face_recognition_config (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    key TEXT UNIQUE NOT NULL,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+НАЧАЛЬНЫЕ ДАННЫЕ (уже вставлены):
+- key='confidence_thresholds', value='{"low_data": 0.75, "medium_data": 0.65, "high_data": 0.55}'
+- key='context_weight', value='0.1'
+- key='min_faces_per_person', value='3'
+- key='auto_retrain_threshold', value='25'
+- key='auto_retrain_percentage', value='0.1'
+
+ВАЖНО: FastAPI должен ЧИТАТЬ эти настройки и использовать при обучении.
+
+================================================================================
+3. ТЕКУЩАЯ СТРУКТУРА FASTAPI ПРОЕКТА
+================================================================================
+
+3.1 СТРУКТУРА ФАЙЛОВ
+--------------------
+fastapi-server/
+├── main.py                          # Главный файл приложения
+├── requirements.txt                 # Зависимости
+├── .env                            # Переменные окружения
+├── models/
+│   └── schemas.py                  # Pydantic модели
+├── services/
+│   ├── auth.py                     # Аутентификация
+│   ├── database.py                 # SQLite база данных
+│   └── face_recognition.py         # Сервис распознавания лиц
+├── routers/
+│   ├── players.py                  # Endpoints для игроков
+│   └── gallery.py                  # Endpoints для галерей
+└── data/
+    ├── face_recognition.db         # SQLite база
+    └── models/                     # InsightFace модели
+
+3.2 ТЕКУЩИЙ main.py (ФРАГМЕНТ)
+------------------------------
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from routers import players, gallery
+from services.face_recognition import FaceRecognitionService
+
+app = FastAPI(title="Face Recognition API")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Инициализация сервиса
+face_service = FaceRecognitionService()
+
+# Роутеры
+app.include_router(players.router, prefix="/api", tags=["players"])
+app.include_router(gallery.router, prefix="/api", tags=["gallery"])
+
+@app.get("/")
+async def root():
+    return {"message": "Face Recognition API"}
+
+3.3 ТЕКУЩИЙ services/database.py (ФРАГМЕНТ)
+-------------------------------------------
+import sqlite3
+import json
+from datetime import datetime
+from typing import List, Dict, Optional
+
+class Database:
+    def __init__(self, db_path: str = "data/face_recognition.db"):
+        self.db_path = db_path
+        self.init_db()
+    
+    def init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Таблица игроков
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS players (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица дескрипторов лиц
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS face_descriptors (
+                id TEXT PRIMARY KEY,
+                player_id TEXT NOT NULL,
+                descriptor TEXT NOT NULL,
+                photo_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (player_id) REFERENCES players(id)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def get_all_players(self) -> List[Dict]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM players")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "name": r[1], "created_at": r[2]} for r in rows]
+    
+    # ... другие методы ...
+
+3.4 ТЕКУЩИЙ services/face_recognition.py (ФРАГМЕНТ)
+---------------------------------------------------
+import numpy as np
+import cv2
+from insightface.app import FaceAnalysis
+import hnswlib
+from typing import List, Dict, Tuple
+from services.database import Database
+
+class FaceRecognitionService:
+    def __init__(self):
+        self.db = Database()
+        
+        # Инициализация InsightFace
+        self.app = FaceAnalysis(
+            name='antelopev2',
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+        )
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        
+        # HNSWLIB индекс
+        self.index = None
+        self.player_ids = []
+        self.load_index()
+    
+    def load_index(self):
+        """Загрузка HNSWLIB индекса из БД"""
+        descriptors = self.db.get_all_descriptors()
+        if not descriptors:
+            return
+        
+        dim = 512  # InsightFace descriptor size
+        self.index = hnswlib.Index(space='cosine', dim=dim)
+        self.index.init_index(max_elements=10000, ef_construction=200, M=16)
+        
+        vectors = []
+        self.player_ids = []
+        for desc in descriptors:
+            vectors.append(np.frombuffer(desc['descriptor'], dtype=np.float32))
+            self.player_ids.append(desc['player_id'])
+        
+        if vectors:
+            self.index.add_items(np.array(vectors), list(range(len(vectors))))
+    
+    def extract_faces(self, image: np.ndarray) -> List[Dict]:
+        """Извлечение лиц из изображения"""
+        faces = self.app.get(image)
+        results = []
+        for face in faces:
+            results.append({
+                'bbox': face.bbox.tolist(),
+                'descriptor': face.embedding,
+                'confidence': float(face.det_score)
+            })
+        return results
+    
+    def search_similar(self, descriptor: np.ndarray, k: int = 5) -> List[Tuple[str, float]]:
+        """Поиск похожих лиц в индексе"""
+        if self.index is None:
+            return []
+        
+        labels, distances = self.index.knn_query(descriptor, k=k)
+        results = []
+        for label, distance in zip(labels[0], distances[0]):
+            player_id = self.player_ids[label]
+            similarity = 1 - distance  # cosine similarity
+            results.append((player_id, similarity))
+        return results
+
+3.5 ТЕКУЩИЙ requirements.txt
+----------------------------
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+insightface==0.7.3
+onnxruntime-gpu==1.16.3
+opencv-python==4.8.1.78
+numpy==1.24.3
+hnswlib==0.7.0
+scikit-learn==1.3.2
+hdbscan==0.8.33
+Pillow==10.1.0
+python-dotenv==1.0.0
+
+================================================================================
+4. ЧТО НУЖНО ДОБАВИТЬ В FASTAPI ПРОЕКТ
+================================================================================
+
+4.1 НОВЫЙ ФАЙЛ: services/supabase_client.py
+-------------------------------------------
+НАЗНАЧЕНИЕ: Клиент для подключения к Supabase и чтения данных для обучения.
+
+ТРЕБОВАНИЯ:
+1. Использовать библиотеку supabase-py
+2. Читать credentials из .env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+3. Методы для получения verified faces с JOIN к photos, people, events
+
+МЕТОДЫ:
+
+async def get_verified_faces(
+    event_ids: Optional[List[str]] = None,
+    person_ids: Optional[List[str]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    min_faces_per_person: int = 3
+) -> List[Dict]:
+    """
+    Получить verified faces из Supabase с фильтрами.
+    
+    Возвращает список словарей:
+    {
+        'face_id': 'uuid',
+        'person_id': 'uuid',
+        'person_name': 'Иван Иванов',
+        'photo_url': 'https://...',
+        'bbox': {'x': 100, 'y': 200, 'width': 150, 'height': 150},
+        'event_id': 'uuid',
+        'event_name': 'Tournament 19.10',
+        'event_date': '2024-10-19'
+    }
+    
+    SQL запрос должен быть примерно таким:
+    SELECT 
+        pf.id as face_id,
+        pf.person_id,
+        pf.bbox,
+        p.real_name as person_name,
+        ph.url as photo_url,
+        ph.event_id,
+        e.name as event_name,
+        e.date as event_date
+    FROM photo_faces pf
+    JOIN people p ON pf.person_id = p.id
+    JOIN photos ph ON pf.photo_id = ph.id
+    LEFT JOIN events e ON ph.event_id = e.id
+    WHERE pf.verified = true
+      AND pf.person_id IS NOT NULL
+      [AND ph.event_id IN (...)]  -- если event_ids указаны
+      [AND pf.person_id IN (...)]  -- если person_ids указаны
+      [AND e.date >= date_from]    -- если date_from указан
+      [AND e.date <= date_to]      -- если date_to указан
+    
+    Затем группировать по person_id и фильтровать тех, у кого >= min_faces_per_person
+    """
+
+async def get_co_occurring_people(event_ids: List[str]) -> Dict[str, List[str]]:
+    """
+    Получить людей, которые часто встречаются вместе на событиях.
+    
+    Возвращает словарь: {person_id: [co_occurring_person_ids]}
+    
+    Логика:
+    1. Для каждого события получить всех людей на фото
+    2. Построить граф связей: кто с кем на одном фото
+    3. Вернуть для каждого человека список тех, с кем он чаще всего
+    """
+
+async def update_face_descriptor(
+    face_id: str,
+    descriptor: np.ndarray,
+    confidence: float,
+    bbox: Dict,
+    training_context: Dict
+):
+    """
+    Обновить insightface_descriptor и связанные поля в Supabase.
+    
+    UPDATE photo_faces SET
+        insightface_descriptor = descriptor,
+        insightface_confidence = confidence,
+        insightface_bbox = bbox,
+        training_used = true,
+        training_context = training_context
+    WHERE id = face_id
+    """
+
+async def create_training_session(session_data: Dict) -> str:
+    """
+    Создать запись в face_training_sessions.
+    
+    INSERT INTO face_training_sessions (
+        model_version, training_mode, faces_count, people_count,
+        context_weight, min_faces_per_person, metrics, status
+    ) VALUES (...)
+    RETURNING id
+    """
+
+async def update_training_session(session_id: str, updates: Dict):
+    """
+    Обновить запись в face_training_sessions.
+    
+    UPDATE face_training_sessions SET
+        status = updates['status'],
+        metrics = updates['metrics']
+    WHERE id = session_id
+    """
+
+async def get_config() -> Dict:
+    """
+    Получить конфигурацию из face_recognition_config.
+    
+    SELECT key, value FROM face_recognition_config
+    
+    Вернуть словарь: {
+        'confidence_thresholds': {...},
+        'context_weight': 0.1,
+        'min_faces_per_person': 3,
+        ...
+    }
+    """
+
+async def update_config(key: str, value: Dict):
+    """
+    Обновить конфигурацию в face_recognition_config.
+    
+    UPDATE face_recognition_config SET
+        value = value,
+        updated_at = now()
+    WHERE key = key
+    """
+
+ОБРАБОТКА ОШИБОК:
+- Если Supabase недоступен → raise ConnectionError с понятным сообщением
+- Если данные не найдены → вернуть пустой список, не падать
+- Логировать все запросы и ошибки
+
+4.2 ОБНОВИТЬ ФАЙЛ: services/database.py
+---------------------------------------
+ДОБАВИТЬ НОВЫЕ ТАБЛИЦЫ В SQLite:
+
+def init_db(self):
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    
+    # ... существующие таблицы ...
+    
+    # НОВАЯ ТАБЛИЦА: training_sessions (локальная копия для кэша)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS training_sessions (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            training_mode TEXT NOT NULL,
+            faces_count INTEGER,
+            people_count INTEGER,
+            context_weight REAL,
+            min_faces_per_person INTEGER,
+            metrics TEXT,
+            status TEXT DEFAULT 'running'
+        )
+    ''')
+    
+    # НОВАЯ ТАБЛИЦА: training_cache (кэш скачанных фото)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS training_cache (
+            photo_url TEXT PRIMARY KEY,
+            local_path TEXT NOT NULL,
+            downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # НОВАЯ ТАБЛИЦА: training_config (локальная копия конфига)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS training_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+ДОБАВИТЬ МЕТОДЫ:
+
+def save_training_session(self, session_id: str, data: Dict):
+    """Сохранить сессию обучения в локальную БД"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO training_sessions 
+        (id, training_mode, faces_count, people_count, context_weight, 
+         min_faces_per_person, metrics, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        session_id,
+        data['training_mode'],
+        data['faces_count'],
+        data['people_count'],
+        data['context_weight'],
+        data['min_faces_per_person'],
+        json.dumps(data.get('metrics', {})),
+        data['status']
+    ))
+    conn.commit()
+    conn.close()
+
+def update_training_session(self, session_id: str, updates: Dict):
+    """Обновить статус сессии обучения"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    values = []
+    for key, value in updates.items():
+        if key == 'metrics':
+            value = json.dumps(value)
+        set_clauses.append(f"{key} = ?")
+        values.append(value)
+    
+    values.append(session_id)
+    query = f"UPDATE training_sessions SET {', '.join(set_clauses)} WHERE id = ?"
+    cursor.execute(query, values)
+    conn.commit()
+    conn.close()
+
+def get_training_session(self, session_id: str) -> Optional[Dict]:
+    """Получить сессию обучения по ID"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_sessions WHERE id = ?", (session_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return None
+    
+    return {
+        'id': row[0],
+        'created_at': row[1],
+        'training_mode': row[2],
+        'faces_count': row[3],
+        'people_count': row[4],
+        'context_weight': row[5],
+        'min_faces_per_person': row[6],
+        'metrics': json.loads(row[7]) if row[7] else {},
+        'status': row[8]
+    }
+
+def get_training_history(self, limit: int = 10, offset: int = 0) -> List[Dict]:
+    """Получить историю обучений"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM training_sessions 
+        ORDER BY created_at DESC 
+        LIMIT ? OFFSET ?
+    ''', (limit, offset))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    return [
+        {
+            'id': r[0],
+            'created_at': r[1],
+            'training_mode': r[2],
+            'faces_count': r[3],
+            'people_count': r[4],
+            'context_weight': r[5],
+            'min_faces_per_person': r[6],
+            'metrics': json.loads(r[7]) if r[7] else {},
+            'status': r[8]
+        }
+        for r in rows
+    ]
+
+def save_photo_cache(self, photo_url: str, local_path: str):
+    """Сохранить информацию о кэшированном фото"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO training_cache (photo_url, local_path)
+        VALUES (?, ?)
+    ''', (photo_url, local_path))
+    conn.commit()
+    conn.close()
+
+def get_cached_photo(self, photo_url: str) -> Optional[str]:
+    """Получить путь к кэшированному фото"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT local_path FROM training_cache WHERE photo_url = ?",
+        (photo_url,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def save_config(self, key: str, value: Dict):
+    """Сохранить конфигурацию в локальную БД"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO training_config (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    ''', (key, json.dumps(value)))
+    conn.commit()
+    conn.close()
+
+def get_config(self) -> Dict:
+    """Получить всю конфигурацию из локальной БД"""
+    conn = sqlite3.connect(self.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM training_config")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    config = {}
+    for key, value in rows:
+        config[key] = json.loads(value)
+    return config
+
+4.3 НОВЫЙ ФАЙЛ: services/training_service.py
+--------------------------------------------
+НАЗНАЧЕНИЕ: Сервис для обучения модели InsightFace.
+
+ТРЕБОВАНИЯ:
+1. Использовать существующий FaceRecognitionService для работы с InsightFace
+2. Использовать SupabaseClient для получения данных
+3. Использовать Database для локального кэша
+4. Обучение должно быть асинхронным (фоновая задача)
+5. Прогресс обучения должен сохраняться в БД
+
+КЛАСС:
+
+class TrainingService:
+    def __init__(self):
+        self.face_service = FaceRecognitionService()
+        self.supabase = SupabaseClient()
+        self.db = Database()
+        self.current_session_id = None
+        self.current_progress = {'current': 0, 'total': 0, 'step': ''}
+    
+    async def prepare_dataset(
+        self,
+        filters: Dict,
+        options: Dict
+    ) -> Dict:
+        """
+        Подготовка датасета для обучения (без запуска обучения).
+        
+        Args:
+            filters: {
+                'event_ids': [...],
+                'person_ids': [...],
+                'date_from': '2024-01-01',
+                'date_to': '2024-12-31'
+            }
+            options: {
+                'min_faces_per_person': 3,
+                'include_co_occurring': true,
+                'context_weight': 0.1
+            }
+        
+        Returns:
+            {
+                'dataset_stats': {
+                    'total_people': 85,
+                    'total_faces': 1064,
+                    'faces_per_person': {'min': 3, 'max': 44, 'avg': 12.5},
+                    'people_by_face_count': {
+                        '3-4': 9,
+                        '5-9': 27,
+                        '10-14': 25,
+                        '15-19': 10,
+                        '20+': 14
+                    }
+                },
+                'validation': {
+                    'ready': true,
+                    'warnings': ['Person X has only 3 faces'],
+                    'errors': []
+                }
+            }
+        """
+        # 1. Получить verified faces из Supabase
+        faces = await self.supabase.get_verified_faces(
+            event_ids=filters.get('event_ids'),
+            person_ids=filters.get('person_ids'),
+            date_from=filters.get('date_from'),
+            date_to=filters.get('date_to'),
+            min_faces_per_person=options['min_faces_per_person']
+        )
+        
+        # 2. Если include_co_occurring, добавить связанных людей
+        if options.get('include_co_occurring'):
+            event_ids = list(set(f['event_id'] for f in faces if f['event_id']))
+            co_occurring = await self.supabase.get_co_occurring_people(event_ids)
+            # Добавить лица связанных людей...
+        
+        # 3. Группировать по person_id и считать статистику
+        people_faces = {}
+        for face in faces:
+            person_id = face['person_id']
+            if person_id not in people_faces:
+                people_faces[person_id] = []
+            people_faces[person_id].append(face)
+        
+        # 4. Рассчитать статистику
+        face_counts = [len(faces) for faces in people_faces.values()]
+        stats = {
+            'total_people': len(people_faces),
+            'total_faces': len(faces),
+            'faces_per_person': {
+                'min': min(face_counts) if face_counts else 0,
+                'max': max(face_counts) if face_counts else 0,
+                'avg': sum(face_counts) / len(face_counts) if face_counts else 0
+            },
+            'people_by_face_count': self._calculate_distribution(face_counts)
+        }
+        
+        # 5. Валидация
+        warnings = []
+        errors = []
+        
+        if stats['total_people'] < 2:
+            errors.append('Need at least 2 people for training')
+        
+        for person_id, faces in people_faces.items():
+            if len(faces) < 5:
+                person_name = faces[0]['person_name']
+                warnings.append(f'{person_name} has only {len(faces)} faces')
+        
+        return {
+            'dataset_stats': stats,
+            'validation': {
+                'ready': len(errors) == 0,
+                'warnings': warnings,
+                'errors': errors
+            }
+        }
+    
+    async def execute_training(
+        self,
+        mode: str,
+        filters: Dict,
+        options: Dict
+    ) -> str:
+        """
+        Запуск обучения модели.
+        
+        Args:
+            mode: 'full' или 'incremental'
+            filters: те же что в prepare_dataset
+            options: {
+                'min_faces_per_person': 3,
+                'context_weight': 0.1,
+                'model_version': 'v1.0',
+                'update_existing': true
+            }
+        
+        Returns:
+            session_id: UUID сессии обучения
+        
+        Логика:
+        1. Создать сессию в Supabase и локальной БД
+        2. Получить verified faces
+        3. Для каждого лица:
+           - Скачать фото (с кэшированием)
+           - Извлечь crop по bbox
+           - Получить InsightFace descriptor
+           - Сохранить в Supabase (insightface_descriptor)
+        4. Обновить HNSWLIB индекс:
+           - full: пересоздать индекс с нуля
+           - incremental: добавить новые дескрипторы
+        5. Рассчитать метрики на тестовой выборке (20%)
+        6. Обновить статус сессии на 'completed'
+        """
+        # 1. Создать сессию
+        session_id = str(uuid.uuid4())
+        session_data = {
+            'model_version': options.get('model_version', 'v1.0'),
+            'training_mode': mode,
+            'faces_count': 0,
+            'people_count': 0,
+            'context_weight': options['context_weight'],
+            'min_faces_per_person': options['min_faces_per_person'],
+            'metrics': {},
+            'status': 'running'
+        }
+        
+        # Сохранить в Supabase
+        await self.supabase.create_training_session({
+            'id': session_id,
+            **session_data
+        })
+        
+        # Сохранить в локальную БД
+        self.db.save_training_session(session_id, session_data)
+        self.current_session_id = session_id
+        
+        # 2. Запустить обучение в фоне
+        # ВАЖНО: Использовать BackgroundTasks из FastAPI
+        # Здесь только инициализация, сам процесс в _train_background
+        
+        return session_id
+    
+    async def _train_background(
+        self,
+        session_id: str,
+        mode: str,
+        filters: Dict,
+        options: Dict
+    ):
+        """
+        Фоновый процесс обучения.
+        
+        Этот метод будет вызван через BackgroundTasks.
+        """
+        try:
+            # 1. Получить verified faces
+            self.current_progress = {
+                'current': 0,
+                'total': 0,
+                'step': 'Loading verified faces'
+            }
+            
+            faces = await self.supabase.get_verified_faces(
+                event_ids=filters.get('event_ids'),
+                person_ids=filters.get('person_ids'),
+                date_from=filters.get('date_from'),
+                date_to=filters.get('date_to'),
+                min_faces_per_person=options['min_faces_per_person']
+            )
+            
+            self.current_progress['total'] = len(faces)
+            
+            # 2. Извлечь дескрипторы
+            self.current_progress['step'] = 'Extracting descriptors'
+            
+            descriptors = []
+            person_ids = []
+            
+            for i, face in enumerate(faces):
+                self.current_progress['current'] = i + 1
+                
+                try:
+                    # Скачать фото (с кэшированием)
+                    image = await self._download_photo(face['photo_url'])
+                    
+                    # Извлечь crop
+                    bbox = face['bbox']
+                    crop = image[
+                        int(bbox['y']):int(bbox['y'] + bbox['height']),
+                        int(bbox['x']):int(bbox['x'] + bbox['width'])
+                    ]
+                    
+                    # Получить дескриптор
+                    faces_detected = self.face_service.extract_faces(crop)
+                    if not faces_detected:
+                        print(f"[WARNING] No face detected in crop for {face['face_id']}")
+                        continue
+                    
+                    descriptor = faces_detected[0]['descriptor']
+                    confidence = faces_detected[0]['confidence']
+                    
+                    # Сохранить в Supabase
+                    if options.get('update_existing', True):
+                        await self.supabase.update_face_descriptor(
+                            face_id=face['face_id'],
+                            descriptor=descriptor,
+                            confidence=confidence,
+                            bbox=faces_detected[0]['bbox'],
+                            training_context={
+                                'event_id': face.get('event_id'),
+                                'event_name': face.get('event_name'),
+                                'training_session_id': session_id
+                            }
+                        )
+                    
+                    descriptors.append(descriptor)
+                    person_ids.append(face['person_id'])
+                    
+                except Exception as e:
+                    print(f"[ERROR] Failed to process face {face['face_id']}: {e}")
+                    continue
+            
+            # 3. Обновить HNSWLIB индекс
+            self.current_progress['step'] = 'Updating index'
+            
+            if mode == 'full':
+                # Пересоздать индекс с нуля
+                self.face_service.index = hnswlib.Index(space='cosine', dim=512)
+                self.face_service.index.init_index(
+                    max_elements=10000,
+                    ef_construction=200,
+                    M=16
+                )
+                self.face_service.player_ids = []
+            
+            # Добавить дескрипторы
+            if descriptors:
+                start_idx = len(self.face_service.player_ids)
+                self.face_service.index.add_items(
+                    np.array(descriptors),
+                    list(range(start_idx, start_idx + len(descriptors)))
+                )
+                self.face_service.player_ids.extend(person_ids)
+            
+            # 4. Рассчитать метрики
+            self.current_progress['step'] = 'Calculating metrics'
+            
+            metrics = await self._calculate_metrics(descriptors, person_ids)
+            
+            # 5. Обновить сессию
+            updates = {
+                'faces_count': len(descriptors),
+                'people_count': len(set(person_ids)),
+                'metrics': metrics,
+                'status': 'completed'
+            }
+            
+            await self.supabase.update_training_session(session_id, updates)
+            self.db.update_training_session(session_id, updates)
+            
+            self.current_progress['step'] = 'Completed'
+            
+        except Exception as e:
+            print(f"[ERROR] Training failed: {e}")
+            updates = {
+                'status': 'failed',
+                'metrics': {'error': str(e)}
+            }
+            await self.supabase.update_training_session(session_id, updates)
+            self.db.update_training_session(session_id, updates)
+    
+    async def _download_photo(self, photo_url: str) -> np.ndarray:
+        """
+        Скачать фото с кэшированием.
+        
+        1. Проверить кэш в БД
+        2. Если есть - загрузить из локального файла
+        3. Если нет - скачать, сохранить в кэш, вернуть
+        """
+        # Проверить кэш
+        cached_path = self.db.get_cached_photo(photo_url)
+        if cached_path and os.path.exists(cached_path):
+            return cv2.imread(cached_path)
+        
+        # Скачать
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(photo_url)
+            response.raise_for_status()
+            
+            # Сохранить в кэш
+            cache_dir = 'data/cache/photos'
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            filename = hashlib.md5(photo_url.encode()).hexdigest() + '.jpg'
+            local_path = os.path.join(cache_dir, filename)
+            
+            with open(local_path, 'wb') as f:
+                f.write(response.content)
+            
+            self.db.save_photo_cache(photo_url, local_path)
+            
+            # Загрузить и вернуть
+            return cv2.imread(local_path)
+    
+    async def _calculate_metrics(
+        self,
+        descriptors: List[np.ndarray],
+        person_ids: List[str]
+    ) -> Dict:
+        """
+        Рассчитать метрики качества модели.
+        
+        1. Разделить на train (80%) и test (20%)
+        2. Для каждого test дескриптора найти ближайший в train
+        3. Рассчитать accuracy, precision, recall
+        """
+        if len(descriptors) < 10:
+            return {'accuracy': 0, 'precision': 0, 'recall': 0, 'note': 'Too few samples'}
+        
+        # Разделить на train/test
+        from sklearn.model_selection import train_test_split
+        
+        indices = list(range(len(descriptors)))
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=0.2,
+            random_state=42,
+            stratify=person_ids
+        )
+        
+        # Создать временный индекс для train
+        train_descriptors = [descriptors[i] for i in train_idx]
+        train_person_ids = [person_ids[i] for i in train_idx]
+        
+        temp_index = hnswlib.Index(space='cosine', dim=512)
+        temp_index.init_index(max_elements=len(train_descriptors), ef_construction=200, M=16)
+        temp_index.add_items(np.array(train_descriptors), list(range(len(train_descriptors))))
+        
+        # Тестировать
+        correct = 0
+        total = len(test_idx)
+        
+        for i in test_idx:
+            test_descriptor = descriptors[i]
+            true_person_id = person_ids[i]
+            
+            # Найти ближайший
+            labels, distances = temp_index.knn_query(test_descriptor, k=1)
+            predicted_person_id = train_person_ids[labels[0][0]]
+            
+            if predicted_person_id == true_person_id:
+                correct += 1
+        
+        accuracy = correct / total if total > 0 else 0
+        
+        return {
+            'accuracy': round(accuracy, 3),
+            'precision': round(accuracy, 3),  # Упрощенно
+            'recall': round(accuracy, 3),     # Упрощенно
+            'test_samples': total,
+            'correct_predictions': correct
+        }
+    
+    def _calculate_distribution(self, face_counts: List[int]) -> Dict[str, int]:
+        """Рассчитать распределение людей по количеству лиц"""
+        distribution = {
+            '3-4': 0,
+            '5-9': 0,
+            '10-14': 0,
+            '15-19': 0,
+            '20+': 0
+        }
+        
+        for count in face_counts:
+            if 3 <= count <= 4:
+                distribution['3-4'] += 1
+            elif 5 <= count <= 9:
+                distribution['5-9'] += 1
+            elif 10 <= count <= 14:
+                distribution['10-14'] += 1
+            elif 15 <= count <= 19:
+                distribution['15-19'] += 1
+            else:
+                distribution['20+'] += 1
+        
+        return distribution
+    
+    def get_training_status(self, session_id: str) -> Dict:
+        """
+        Получить статус обучения.
+        
+        Returns:
+            {
+                'session_id': 'uuid',
+                'status': 'running',
+                'progress': {'current': 500, 'total': 1064, 'percentage': 47},
+                'current_step': 'Extracting descriptors',
+                'started_at': '2024-01-15T10:30:00Z',
+                'estimated_completion': '2024-01-15T10:45:00Z'
+            }
+        """
+        session = self.db.get_training_session(session_id)
+        if not session:
+            return {'error': 'Session not found'}
+        
+        result = {
+            'session_id': session_id,
+            'status': session['status'],
+            'started_at': session['created_at']
+        }
+        
+        if session_id == self.current_session_id and session['status'] == 'running':
+            result['progress'] = {
+                'current': self.current_progress['current'],
+                'total': self.current_progress['total'],
+                'percentage': int(
+                    (self.current_progress['current'] / self.current_progress['total'] * 100)
+                    if self.current_progress['total'] > 0 else 0
+                )
+            }
+            result['current_step'] = self.current_progress['step']
+            
+            # Оценка времени завершения
+            if self.current_progress['current'] > 0:
+                elapsed = (datetime.now() - datetime.fromisoformat(session['created_at'])).total_seconds()
+                avg_time_per_face = elapsed / self.current_progress['current']
+                remaining_faces = self.current_progress['total'] - self.current_progress['current']
+                estimated_seconds = remaining_faces * avg_time_per_face
+                estimated_completion = datetime.now() + timedelta(seconds=estimated_seconds)
+                result['estimated_completion'] = estimated_completion.isoformat()
+        
+        return result
+    
+    def get_training_history(self, limit: int = 10, offset: int = 0) -> Dict:
+        """
+        Получить историю обучений.
+        
+        Returns:
+            {
+                'sessions': [...],
+                'total': 15
+            }
+        """
+        sessions = self.db.get_training_history(limit, offset)
+        
+        # Получить общее количество
+        conn = sqlite3.connect(self.db.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM training_sessions")
+        total = cursor.fetchone()[0]
+        conn.close()
+        
+        return {
+            'sessions': sessions,
+            'total': total
+        }
+
+4.4 НОВЫЙ ФАЙЛ: routers/training.py
+-----------------------------------
+НАЗНАЧЕНИЕ: API endpoints для обучения модели.
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from typing import Optional, List, Dict
+from services.training_service import TrainingService
+
+router = APIRouter()
+training_service = TrainingService()
+
+# Pydantic модели для валидации
+
+class TrainingFilters(BaseModel):
+    event_ids: Optional[List[str]] = None
+    person_ids: Optional[List[str]] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+
+class TrainingOptions(BaseModel):
+    min_faces_per_person: int = 3
+    include_co_occurring: bool = False
+    context_weight: float = 0.1
+
+class PrepareRequest(BaseModel):
+    filters: TrainingFilters
+    options: TrainingOptions
+
+class ExecuteRequest(BaseModel):
+    mode: str  # 'full' или 'incremental'
+    filters: TrainingFilters
+    options: TrainingOptions
+    model_version: Optional[str] = 'v1.0'
+    update_existing: bool = True
+
+class ConfigUpdate(BaseModel):
+    confidence_thresholds: Optional[Dict[str, float]] = None
+    context_weight: Optional[float] = None
+    min_faces_per_person: Optional[int] = None
+    auto_retrain_threshold: Optional[int] = None
+    auto_retrain_percentage: Optional[float] = None
+
+# Endpoints
+
+@router.post("/train/prepare")
+async def prepare_training(request: PrepareRequest):
+    """
+    Подготовка датасета для обучения (без запуска обучения).
+    
+    Возвращает статистику и валидацию датасета.
+    """
+    try:
+        result = await training_service.prepare_dataset(
+            filters=request.filters.dict(),
+            options=request.options.dict()
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/train/execute")
+async def execute_training(
+    request: ExecuteRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Запуск обучения модели.
+    
+    Обучение выполняется в фоне. Возвращает session_id для отслеживания прогресса.
+    """
+    try:
+        # Валидация mode
+        if request.mode not in ['full', 'incremental']:
+            raise HTTPException(
+                status_code=400,
+                detail="mode must be 'full' or 'incremental'"
+            )
+        
+        # Создать сессию
+        session_id = await training_service.execute_training(
+            mode=request.mode,
+            filters=request.filters.dict(),
+            options={
+                **request.options.dict(),
+                'model_version': request.model_version,
+                'update_existing': request.update_existing
+            }
+        )
+        
+        # Запустить обучение в фоне
+        background_tasks.add_task(
+            training_service._train_background,
+            session_id=session_id,
+            mode=request.mode,
+            filters=request.filters.dict(),
+            options={
+                **request.options.dict(),
+                'model_version': request.model_version,
+                'update_existing': request.update_existing
+            }
+        )
+        
+        return {
+            'session_id': session_id,
+            'status': 'running',
+            'message': 'Training started in background'
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/train/status/{session_id}")
+async def get_training_status(session_id: str):
+    """
+    Получить статус обучения по session_id.
+    """
+    try:
+        status = training_service.get_training_status(session_id)
+        if 'error' in status:
+            raise HTTPException(status_code=404, detail=status['error'])
+        return status
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/train/history")
+async def get_training_history(limit: int = 10, offset: int = 0):
+    """
+    Получить историю обучений.
+    """
+    try:
+        history = training_service.get_training_history(limit, offset)
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/config")
+async def get_config():
+    """
+    Получить текущую конфигурацию распознавания.
+    """
+    try:
+        # Сначала попробовать из Supabase
+        config = await training_service.supabase.get_config()
+        
+        # Если пусто, взять из локальной БД
+        if not config:
+            config = training_service.db.get_config()
+        
+        return config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/config")
+async def update_config(updates: ConfigUpdate):
+    """
+    Обновить конфигурацию распознавания.
+    """
+    try:
+        # Обновить в Supabase
+        for key, value in updates.dict(exclude_none=True).items():
+            await training_service.supabase.update_config(key, value)
+        
+        # Обновить в локальной БД
+        for key, value in updates.dict(exclude_none=True).items():
+            training_service.db.save_config(key, value)
+        
+        return {
+            'success': True,
+            'updated_at': datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+4.5 ОБНОВИТЬ ФАЙЛ: main.py
+--------------------------
+ДОБАВИТЬ НОВЫЙ РОУТЕР:
+
+# ... existing imports ...
+from routers import players, gallery, training  # добавлен training
+
+
+# Роутеры
+app.include_router(players.router, prefix="/api", tags=["players"])
+app.include_router(gallery.router, prefix="/api", tags=["gallery"])
+app.include_router(training.router, prefix="/api/v2", tags=["training"])  # новый роутер
+
+4.6 ОБНОВИТЬ ФАЙЛ: requirements.txt
+-----------------------------------
+ДОБАВИТЬ ЗАВИСИМОСТИ:
+
+# ... existing dependencies ...
+
+# Новые зависимости для обучения
+supabase-py>=2.0.0
+httpx>=0.24.0
+scikit-learn>=1.3.2
+
+4.7 СОЗДАТЬ ФАЙЛ: .env.example
+------------------------------
+ПРИМЕР ПЕРЕМЕННЫХ ОКРУЖЕНИЯ:
+
+# Supabase credentials
+SUPABASE_URL=https://jczmumbzpqlckbkgznsd.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here
+
+# API settings
+API_HOST=0.0.0.0
+API_PORT=8001
+
+# Auth (если используется)
+API_KEY=your-api-key-here
+
+ВАЖНО: Пользователь должен создать файл .env на сервере с реальными значениями.
+
+================================================================================
+5. ЛОГИКА РАБОТЫ ENDPOINTS
+================================================================================
+
+5.1 ПОТОК: ПОДГОТОВКА ДАТАСЕТА
+------------------------------
+1. Клиент → POST /api/v2/train/prepare
+2. TrainingService.prepare_dataset():
+   - Получить verified faces из Supabase
+   - Применить фильтры (события, люди, даты)
+   - Если include_co_occurring: добавить связанных людей
+   - Группировать по person_id
+   - Фильтровать по min_faces_per_person
+   - Рассчитать статистику
+   - Валидировать (минимум 2 человека)
+3. Вернуть статистику и валидацию
+4. Клиент показывает пользователю статистику
+5. Пользователь решает запускать обучение или нет
+
+5.2 ПОТОК: ЗАПУСК ОБУЧЕНИЯ
+--------------------------
+1. Клиент → POST /api/v2/train/execute
+2. TrainingService.execute_training():
+   - Создать session в Supabase и SQLite
+   - Вернуть session_id
+   - Запустить _train_background в BackgroundTasks
+3. Клиент получает session_id
+4. Фоновый процесс _train_background():
+   - Получить verified faces
+   - Для каждого лица:
+     * Скачать фото (с кэшированием)
+     * Извлечь crop по bbox
+     * Получить InsightFace descriptor
+     * Сохранить в Supabase (insightface_descriptor)
+   - Обновить HNSWLIB индекс (full или incremental)
+   - Рассчитать метрики на тестовой выборке
+   - Обновить session status='completed'
+5. Клиент периодически опрашивает GET /api/v2/train/status/{session_id}
+
+5.3 ПОТОК: ОТСЛЕЖИВАНИЕ ПРОГРЕССА
+---------------------------------
+1. Клиент → GET /api/v2/train/status/{session_id} (каждые 2-3 секунды)
+2. TrainingService.get_training_status():
+   - Получить session из БД
+   - Если session_id == current_session_id:
+     * Вернуть текущий прогресс (current/total/percentage)
+     * Вернуть текущий шаг (Loading, Extracting, Updating, etc.)
+     * Рассчитать estimated_completion
+   - Иначе вернуть только статус из БД
+3. Клиент показывает прогресс-бар пользователю
+4. Когда status='completed' → показать метрики
+
+5.4 ПОТОК: ПРОСМОТР ИСТОРИИ
+---------------------------
+1. Клиент → GET /api/v2/train/history?limit=10&offset=0
+2. TrainingService.get_training_history():
+   - Получить список sessions из SQLite
+   - Вернуть с пагинацией
+3. Клиент показывает таблицу с историей обучений
+
+5.5 ПОТОК: УПРАВЛЕНИЕ КОНФИГУРАЦИЕЙ
+-----------------------------------
+1. Клиент → GET /api/v2/config
+2. TrainingService → SupabaseClient.get_config()
+3. Вернуть текущие настройки
+4. Клиент показывает форму с ползунками
+5. Пользователь меняет настройки
+6. Клиент → PUT /api/v2/config
+7. TrainingService → обновить в Supabase и SQLite
+8. Вернуть success
+
+================================================================================
+6. ОБРАБОТКА ОШИБОК
+================================================================================
+
+6.1 ОШИБКИ ПОДКЛЮЧЕНИЯ К SUPABASE
+---------------------------------
+Если Supabase недоступен:
+- Логировать ошибку
+- Вернуть HTTPException(503, "Supabase unavailable")
+- НЕ падать, продолжать работу с локальной БД
+
+6.2 ОШИБКИ СКАЧИВАНИЯ ФОТО
+--------------------------
+Если фото не скачалось:
+- Логировать warning
+- Пропустить это лицо
+- Продолжить обучение на остальных
+- В конце показать статистику: "Processed 1050/1064 faces (14 failed)"
+
+6.3 ОШИБКИ РАСПОЗНАВАНИЯ ЛИЦА
+-----------------------------
+Если InsightFace не нашел лицо в crop:
+- Логировать warning
+- Пропустить это лицо
+- Продолжить обучение
+
+6.4 ОШИБКИ ОБУЧЕНИЯ
+-------------------
+Если обучение упало с exception:
+- Логировать error
+- Обновить session status='failed'
+- Сохранить error в metrics
+- Вернуть понятное сообщение пользователю
+
+6.5 ВАЛИДАЦИЯ ВХОДНЫХ ДАННЫХ
+----------------------------
+- mode должен быть 'full' или 'incremental'
+- min_faces_per_person >= 1
+- context_weight между 0.0 и 1.0
+- confidence_thresholds между 0.0 и 1.0
+
+================================================================================
+7. ТЕСТИРОВАНИЕ
+================================================================================
+
+7.1 UNIT ТЕСТЫ
+--------------
+Создать тесты для:
+- SupabaseClient.get_verified_faces() с разными фильтрами
+- TrainingService.prepare_dataset() с разными опциями
+- TrainingService._calculate_metrics() на тестовых данных
+- Database методы (save/get training_session)
+
+7.2 INTEGRATION ТЕСТЫ
+---------------------
+Создать тесты для:
+- Полный цикл: prepare → execute → status → history
+- Обучение на реальных данных (если есть тестовая БД)
+- Обработка ошибок (недоступный Supabase, битые фото)
+
+7.3 РУЧНОЕ ТЕСТИРОВАНИЕ
+-----------------------
+1. Запустить prepare с разными фильтрами
+2. Запустить full training на 10-20 лицах
+3. Проверить что дескрипторы сохранились в Supabase
+4. Запустить incremental training на новых лицах
+5. Проверить что индекс обновился
+6. Проверить метрики accuracy
+7. Изменить конфигурацию и проверить что применилась
+
+================================================================================
+8. РАЗВЕРТЫВАНИЕ
+================================================================================
+
+8.1 УСТАНОВКА ЗАВИСИМОСТЕЙ
+--------------------------
+На сервере выполнить:
+
+cd /path/to/fastapi-server
+pip install -r requirements.txt
+
+8.2 НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+----------------------------------
+Создать файл .env:
+
+SUPABASE_URL=https://jczmumbzpqlckbkgznsd.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<получить из Supabase dashboard>
+API_HOST=0.0.0.0
+API_PORT=8001
+
+8.3 СОЗДАНИЕ ДИРЕКТОРИЙ
+-----------------------
+mkdir -p data/cache/photos
+
+8.4 ЗАПУСК СЕРВЕРА
+------------------
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+8.5 ПРОВЕРКА РАБОТОСПОСОБНОСТИ
+------------------------------
+curl http://23.88.61.20:8001/
+curl http://23.88.61.20:8001/api/v2/config
+
+8.6 МОНИТОРИНГ ЛОГОВ
+--------------------
+tail -f logs/app.log
+
+================================================================================
+9. ВАЖНЫЕ ЗАМЕЧАНИЯ
+================================================================================
+
+9.1 ПРОИЗВОДИТЕЛЬНОСТЬ
+----------------------
+- Скачивание фото - самая медленная операция (кэшировать!)
+- Извлечение дескрипторов - быстро (GPU)
+- Обновление индекса - быстро
+- Ожидаемое время: ~1-2 секунды на лицо
+
+9.2 ПАМЯТЬ
+----------
+- HNSWLIB индекс в памяти: ~2KB на дескриптор
+- 1000 дескрипторов = ~2MB
+- Кэш фото на диске: ~100KB на фото
+- 1000 фото = ~100MB
+
+9.3 БЕЗОПАСНОСТЬ
+----------------
+- SUPABASE_SERVICE_ROLE_KEY - секретный ключ, не коммитить!
+- Использовать HTTPS для production
+- Добавить rate limiting для endpoints
+- Валидировать все входные данные
+
+9.4 МАСШТАБИРОВАНИЕ
+-------------------
+- Для >10000 лиц рассмотреть PostgreSQL вместо SQLite
+- Для >100000 лиц рассмотреть векторную БД (Pinecone, Weaviate)
+- Для параллельного обучения использовать Celery
+
+================================================================================
+10. ЧЕКЛИСТ РЕАЛИЗАЦИИ
+================================================================================
+
+[ ] 1. Создать services/supabase_client.py
+    [ ] Метод get_verified_faces()
+    [ ] Метод get_co_occurring_people()
+    [ ] Метод update_face_descriptor()
+    [ ] Метод create_training_session()
+    [ ] Метод update_training_session()
+    [ ] Метод get_config()
+    [ ] Метод update_config()
+
+[ ] 2. Обновить services/database.py
+    [ ] Таблица training_sessions
+    [ ] Таблица training_cache
+    [ ] Таблица training_config
+    [ ] Методы save/get/update training_session
+    [ ] Методы save/get photo_cache
+    [ ] Методы save/get config
+
+[ ] 3. Создать services/training_service.py
+    [ ] Метод prepare_dataset()
+    [ ] Метод execute_training()
+    [ ] Метод _train_background()
+    [ ] Метод _download_photo()
+    [ ] Метод _calculate_metrics()
+    [ ] Метод get_training_status()
+    [ ] Метод get_training_history()
+
+[ ] 4. Создать routers/training.py
+    [ ] POST /train/prepare
+    [ ] POST /train/execute
+    [ ] GET /train/status/{session_id}
+    [ ] GET /train/history
+    [ ] GET /config
+    [ ] PUT /config
+
+[ ] 5. Обновить main.py
+    [ ] Добавить import training router
+    [ ] Добавить app.include_router(training.router)
+
+[ ] 6. Обновить requirements.txt
+    [ ] Добавить supabase-py
+    [ ] Добавить httpx
+    [ ] Добавить scikit-learn
+
+[ ] 7. Создать .env.example
+
+[ ] 8. Тестирование
+    [ ] Unit тесты
+    [ ] Integration тесты
+    [ ] Ручное тестирование
+
+[ ] 9. Документация
+    [ ] README с инструкциями
+    [ ] API документация (Swagger)
+
+[ ] 10. Развертывание
+    [ ] Установить зависимости
+    [ ] Настроить .env
+    [ ] Запустить сервер
+    [ ] Проверить работоспособность
+
+================================================================================
+КОНЕЦ ТЕХНИЧЕСКОГО ЗАДАНИЯ
+================================================================================
+
+ВАЖНО: Это полное и детальное ТЗ. Все необходимые детали включены.
+Не нужно задавать дополнительных вопросов - просто реализуйте по этому ТЗ.
+
+Если что-то неясно - перечитайте соответствующий раздел, там есть все детали.
+
+Удачи в реализации!

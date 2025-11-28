@@ -1,0 +1,17 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+insightface==0.7.3
+onnxruntime>=1.17.0
+numpy==1.24.3
+opencv-python-headless==4.9.0.80
+pillow==10.2.0
+hnswlib==0.8.0
+hdbscan==0.8.33
+scikit-learn==1.4.0
+aiofiles==23.2.1
+pydantic==2.5.3
+python-jose[cryptography]==3.3.0
+python-dotenv==1.0.0
+httpx==0.26.0
+asyncpg==0.29.0
