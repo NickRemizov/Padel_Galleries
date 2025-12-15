@@ -7,8 +7,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
+import json
 
 from services.postgres_client import PostgresClient
+
 from models.schemas import PersonCreate, PersonUpdate, PersonResponse, ClusterFace, PersonFromClusterCreate
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,145 @@ async def get_person_photos(person_id: str):
         
     except Exception as e:
         logger.error(f"[PeopleAPI] Error getting person photos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{person_id}/photos-with-details")
+async def get_person_photos_with_details(person_id: str):
+    """
+    Получить все фото персоны с детальной информацией для админки.
+    Включает: boundingBox, confidence, verified, gallery info, sort_order.
+    
+    Returns:
+        List of photos with face details for admin gallery dialog
+    """
+    try:
+        db = PostgresClient()
+        await db.connect()
+        
+        query = """
+            SELECT 
+                gi.id,
+                gi.gallery_id,
+                gi.image_url,
+                gi.original_url,
+                gi.original_filename as filename,
+                gi.width,
+                gi.height,
+                gi.created_at,
+                pf.id as face_id,
+                pf.insightface_bbox as bounding_box,
+                pf.recognition_confidence as confidence,
+                pf.verified,
+                g.title as gallery_name,
+                g.shoot_date,
+                g.sort_order,
+                (SELECT COUNT(*) FROM photo_faces WHERE photo_id = gi.id) as face_count
+            FROM gallery_images gi
+            INNER JOIN photo_faces pf ON pf.photo_id = gi.id
+            INNER JOIN galleries g ON g.id = gi.gallery_id
+            WHERE pf.person_id = $1
+            ORDER BY g.shoot_date DESC NULLS LAST, gi.original_filename ASC
+        """
+        
+        rows = await db.fetch(query, person_id)
+        
+        photos = []
+        for row in rows:
+            row_dict = dict(row)
+            
+            # Parse bounding box from JSON if needed
+            bbox = row_dict.get('bounding_box')
+            if bbox:
+                if isinstance(bbox, str):
+                    try:
+                        bbox = json.loads(bbox)
+                    except:
+                        bbox = None
+            
+            photos.append({
+                "id": str(row_dict['id']),
+                "image_url": row_dict['image_url'],
+                "gallery_id": str(row_dict['gallery_id']),
+                "width": row_dict['width'] or 0,
+                "height": row_dict['height'] or 0,
+                "faceId": str(row_dict['face_id']),
+                "confidence": float(row_dict['confidence']) if row_dict.get('confidence') else None,
+                "verified": bool(row_dict.get('verified', False)),
+                "boundingBox": bbox,
+                "faceCount": int(row_dict.get('face_count', 1)),
+                "filename": row_dict['filename'] or "unknown",
+                "gallery_name": row_dict.get('gallery_name'),
+                "shootDate": str(row_dict['shoot_date']) if row_dict.get('shoot_date') else None,
+                "sort_order": row_dict.get('sort_order') or "filename",
+                "created_at": str(row_dict['created_at']) if row_dict.get('created_at') else None,
+            })
+        
+        logger.info(f"[PeopleAPI] Found {len(photos)} photos with details for person {person_id}")
+        return {"success": True, "data": photos}
+        
+    except Exception as e:
+        logger.error(f"[PeopleAPI] Error getting person photos with details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{person_id}/verify-on-photo")
+async def verify_person_on_photo(person_id: str, photo_id: str):
+    """
+    Подтвердить (верифицировать) персону на фото.
+    Устанавливает verified=true и confidence=1 для соответствующей записи photo_faces.
+    """
+    try:
+        db = PostgresClient()
+        await db.connect()
+        
+        query = """
+            UPDATE photo_faces
+            SET verified = true, recognition_confidence = 1.0
+            WHERE person_id = $1 AND photo_id = $2
+            RETURNING id
+        """
+        
+        result = await db.fetch(query, person_id, photo_id)
+        
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Face not found for person {person_id} on photo {photo_id}")
+        
+        logger.info(f"[PeopleAPI] Verified person {person_id} on photo {photo_id}")
+        return {"success": True, "data": {"verified": True}}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[PeopleAPI] Error verifying person on photo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{person_id}/unlink-from-photo")
+async def unlink_person_from_photo(person_id: str, photo_id: str):
+    """
+    Отвязать персону от фото.
+    Устанавливает person_id=NULL, verified=false для записи photo_faces.
+    """
+    try:
+        db = PostgresClient()
+        await db.connect()
+        
+        query = """
+            UPDATE photo_faces
+            SET person_id = NULL, verified = false, recognition_confidence = NULL
+            WHERE person_id = $1 AND photo_id = $2
+            RETURNING id
+        """
+        
+        result = await db.fetch(query, person_id, photo_id)
+        unlinked_count = len(result) if result else 0
+        
+        logger.info(f"[PeopleAPI] Unlinked person {person_id} from photo {photo_id}, count: {unlinked_count}")
+        return {"success": True, "data": {"unlinked_count": unlinked_count}}
+        
+    except Exception as e:
+        logger.error(f"[PeopleAPI] Error unlinking person from photo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
