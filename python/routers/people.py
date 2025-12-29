@@ -10,7 +10,6 @@ import logging
 import json
 
 from services.postgres_client import PostgresClient
-from services.face_recognition import FaceRecognitionService
 
 from models.schemas import PersonCreate, PersonUpdate, PersonResponse, ClusterFace, PersonFromClusterCreate
 
@@ -309,9 +308,9 @@ async def unlink_person_from_photo(person_id: str, photo_id: str):
         result = await db.fetch(query, person_id, photo_id)
         unlinked_count = len(result) if result else 0
         
-        # 3. Перестраиваем индекс
+        # 3. Перестраиваем индекс (импортируем здесь чтобы избежать циклического импорта)
         if unlinked_count > 0:
-            face_service = FaceRecognitionService()
+            from routers.recognition import face_service
             await face_service.rebuild_players_index()
             logger.info(f"[PeopleAPI] Index rebuilt after unlinking person {person_id} from photo {photo_id}")
         
