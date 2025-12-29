@@ -10,6 +10,7 @@ import logging
 import json
 
 from services.postgres_client import PostgresClient
+from services.face_recognition import FaceRecognitionService
 
 from models.schemas import PersonCreate, PersonUpdate, PersonResponse, ClusterFace, PersonFromClusterCreate
 
@@ -283,11 +284,21 @@ async def unlink_person_from_photo(person_id: str, photo_id: str):
     """
     Отвязать персону от фото.
     Устанавливает person_id=NULL, verified=false для записи photo_faces.
+    Удаляет дескриптор из face_descriptors и перестраивает индекс.
     """
     try:
         db = PostgresClient()
         await db.connect()
         
+        # 1. Удаляем дескриптор из face_descriptors
+        delete_descriptor_query = """
+            DELETE FROM face_descriptors
+            WHERE person_id = $1 AND source_image_id = $2
+        """
+        await db.execute(delete_descriptor_query, person_id, photo_id)
+        logger.info(f"[PeopleAPI] Deleted descriptor for person {person_id} from photo {photo_id}")
+        
+        # 2. Обновляем photo_faces
         query = """
             UPDATE photo_faces
             SET person_id = NULL, verified = false, recognition_confidence = NULL
@@ -297,6 +308,12 @@ async def unlink_person_from_photo(person_id: str, photo_id: str):
         
         result = await db.fetch(query, person_id, photo_id)
         unlinked_count = len(result) if result else 0
+        
+        # 3. Перестраиваем индекс
+        if unlinked_count > 0:
+            face_service = FaceRecognitionService()
+            await face_service.rebuild_players_index()
+            logger.info(f"[PeopleAPI] Index rebuilt after unlinking person {person_id} from photo {photo_id}")
         
         logger.info(f"[PeopleAPI] Unlinked person {person_id} from photo {photo_id}, count: {unlinked_count}")
         return {"success": True, "data": {"unlinked_count": unlinked_count}}
