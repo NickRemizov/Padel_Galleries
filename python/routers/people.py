@@ -10,6 +10,7 @@ import logging
 import json
 
 from services.postgres_client import PostgresClient
+from services.face_recognition import FaceRecognitionService
 
 from models.schemas import PersonCreate, PersonUpdate, PersonResponse, ClusterFace, PersonFromClusterCreate
 
@@ -113,6 +114,11 @@ async def delete_person(person_id: str):
         
         if not success:
             raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
+        
+        # Rebuild index after deleting person (removes their descriptors)
+        face_service = FaceRecognitionService()
+        await face_service.rebuild_players_index()
+        logger.info(f"[PeopleAPI] Index rebuilt after deleting person {person_id}")
         
         logger.info(f"[PeopleAPI] Deleted person: {person_id}")
         return {"success": True, "message": f"Person {person_id} deleted"}
@@ -251,6 +257,7 @@ async def verify_person_on_photo(person_id: str, photo_id: str):
     """
     Подтвердить (верифицировать) персону на фото.
     Устанавливает verified=true и confidence=1 для соответствующей записи photo_faces.
+    Перестраивает индекс распознавания.
     """
     try:
         db = PostgresClient()
@@ -268,6 +275,11 @@ async def verify_person_on_photo(person_id: str, photo_id: str):
         if not result:
             raise HTTPException(status_code=404, detail=f"Face not found for person {person_id} on photo {photo_id}")
         
+        # Rebuild index after verification (adds verified descriptor)
+        face_service = FaceRecognitionService()
+        await face_service.rebuild_players_index()
+        logger.info(f"[PeopleAPI] Index rebuilt after verifying person {person_id} on photo {photo_id}")
+        
         logger.info(f"[PeopleAPI] Verified person {person_id} on photo {photo_id}")
         return {"success": True, "data": {"verified": True}}
         
@@ -278,11 +290,50 @@ async def verify_person_on_photo(person_id: str, photo_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/{person_id}/batch-verify-on-photos")
+async def batch_verify_person_on_photos(person_id: str, photo_ids: List[str]):
+    """
+    Batch verify person on multiple photos.
+    Rebuilds index once after all verifications.
+    """
+    try:
+        db = PostgresClient()
+        await db.connect()
+        
+        if not photo_ids:
+            return {"success": True, "data": {"verified_count": 0}}
+        
+        # Build query with array of photo_ids
+        query = """
+            UPDATE photo_faces
+            SET verified = true, recognition_confidence = 1.0
+            WHERE person_id = $1 AND photo_id = ANY($2::uuid[])
+            RETURNING id
+        """
+        
+        result = await db.fetch(query, person_id, photo_ids)
+        verified_count = len(result) if result else 0
+        
+        # Rebuild index once after batch verification
+        if verified_count > 0:
+            face_service = FaceRecognitionService()
+            await face_service.rebuild_players_index()
+            logger.info(f"[PeopleAPI] Index rebuilt after batch verifying {verified_count} photos for person {person_id}")
+        
+        logger.info(f"[PeopleAPI] Batch verified person {person_id} on {verified_count} photos")
+        return {"success": True, "data": {"verified_count": verified_count}}
+        
+    except Exception as e:
+        logger.error(f"[PeopleAPI] Error batch verifying person on photos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{person_id}/unlink-from-photo")
 async def unlink_person_from_photo(person_id: str, photo_id: str):
     """
     Отвязать персону от фото.
     Устанавливает person_id=NULL, verified=false для записи photo_faces.
+    Перестраивает индекс распознавания для удаления дескриптора.
     """
     try:
         db = PostgresClient()
@@ -297,6 +348,12 @@ async def unlink_person_from_photo(person_id: str, photo_id: str):
         
         result = await db.fetch(query, person_id, photo_id)
         unlinked_count = len(result) if result else 0
+        
+        # Rebuild index after unlinking (removes descriptor from index)
+        if unlinked_count > 0:
+            face_service = FaceRecognitionService()
+            await face_service.rebuild_players_index()
+            logger.info(f"[PeopleAPI] Index rebuilt after unlinking person {person_id} from photo {photo_id}")
         
         logger.info(f"[PeopleAPI] Unlinked person {person_id} from photo {photo_id}, count: {unlinked_count}")
         return {"success": True, "data": {"unlinked_count": unlinked_count}}
